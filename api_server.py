@@ -13,7 +13,7 @@ import io
 import tempfile
 import time
 from num2words import num2words
-from kokoro import KPipeline
+from kokoro import KModel, KPipeline
 from pydub import AudioSegment
 from enum import Enum
 
@@ -37,13 +37,16 @@ model_dir = Path("./kokoro_model")
 class TTSEngine:
     def __init__(self):
         self.pipelines = {}
+        self.models = {}
         self.device = None
+        self.cuda_available = False
         self.setup_model()
     
     def setup_model(self):
         """Initialize the TTS model and check GPU availability"""
         # Check GPU availability
-        if torch.cuda.is_available():
+        self.cuda_available = torch.cuda.is_available()
+        if self.cuda_available:
             self.device = 'cuda'
             print(f"GPU Available: {torch.cuda.get_device_name(0)}")
         else:
@@ -60,7 +63,7 @@ class TTSEngine:
         if not voices_path.exists():
             raise FileNotFoundError(f"Voices directory not found: {voices_path}")
         
-        # Set environment variables for local cache usage (don't set offline mode)
+        # Set environment variables for complete offline operation
         os.environ['HF_HOME'] = str(model_dir)
         os.environ['TRANSFORMERS_CACHE'] = str(model_dir)
         os.environ['HF_HUB_CACHE'] = str(model_dir)
@@ -68,21 +71,47 @@ class TTSEngine:
         os.environ['KOKORO_MODEL_PATH'] = str(model_path)
         os.environ['KOKORO_VOICES_PATH'] = str(voices_path)
         
-        # Disable telemetry but allow downloads if needed
+        # Force complete offline mode - no internet access
+        os.environ['HF_HUB_OFFLINE'] = '1'
+        os.environ['TRANSFORMERS_OFFLINE'] = '1'
         os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+        os.environ['HF_DATASETS_OFFLINE'] = '1'
         
-        print(f"Model initialized on {self.device}")
+        print("Forced offline mode - no internet access allowed")
+        
+        # Initialize KModel instances using local files only
+        model_path = model_dir / "kokoro-v1_0.pth"
+        
+        try:
+            # Always create CPU model from local file
+            print(f"Loading CPU model from: {model_path}")
+            self.models[False] = KModel(str(model_path)).to('cpu').eval()
+            
+            # Create GPU model if available
+            if self.cuda_available:
+                print(f"Loading GPU model from: {model_path}")
+                self.models[True] = KModel(str(model_path)).to('cuda').eval()
+                
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            print(f"Make sure {model_path} exists and is accessible")
+            raise
+        
+        print(f"Models initialized - CPU: True, GPU: {self.cuda_available}")
     
     def get_pipeline(self, lang_code):
         """Get or create pipeline for specific language"""
         if lang_code not in self.pipelines:
-            # Initialize pipeline exactly like working voice_generator.py
-            model_path = model_dir / "kokoro-v1_0.pth"
-            self.pipelines[lang_code] = KPipeline(
-                lang_code=lang_code,
-                model=str(model_path),
-                device=self.device
-            )
+            # Initialize pipeline without model (offline mode)
+            try:
+                self.pipelines[lang_code] = KPipeline(
+                    lang_code=lang_code,
+                    model=False  # Don't load model in pipeline - use cached models
+                )
+                print(f"Pipeline for '{lang_code}' initialized successfully (offline)")
+            except Exception as e:
+                print(f"Error initializing pipeline for '{lang_code}': {e}")
+                raise
         return self.pipelines[lang_code]
     
     def amount_to_words_english(self, amount):
@@ -191,8 +220,11 @@ class TTSEngine:
             else:
                 return f"{int(amount)}瑞尔"
     
-    def generate_speech(self, amount: float, currency: str, language: str):
+    def generate_speech(self, amount: float, currency: str, language: str, speed: float = 1.0, use_gpu: bool = None):
         """Generate speech audio for the given parameters"""
+        # Default to GPU if available, otherwise CPU
+        if use_gpu is None:
+            use_gpu = self.cuda_available
         try:
             # Convert amount to words based on language and currency
             if language == "EN":
@@ -211,26 +243,34 @@ class TTSEngine:
                 lang_code = 'z'  # Chinese
                 voice = 'zf_xiaoxiao'  # Female Chinese voice
             
-            print(f"Generating text using voice '{voice}' in language '{language}'")
+            print(f"Generating text using voice '{voice}' in language '{language}', speed: {speed}, GPU: {use_gpu}")
             
-            # Create pipeline fresh each time like working voice_generator.py
-            model_path = model_dir / "kokoro-v1_0.pth"
-            pipeline = KPipeline(
-                lang_code=lang_code,
-                model=str(model_path),
-                device=self.device
-            )
+            # Get cached pipeline
+            pipeline = self.get_pipeline(lang_code)
             
-            # Generate audio
-            generator = pipeline(text, voice=voice, split_pattern=r'\n+')
+            # Load voice pack
+            pack = pipeline.load_voice(voice)
             
-            # Extract audio data
-            for i, (gs, ps, audio) in enumerate(generator):
-                # Apply slower speech and return as WAV
+            # Generate phonemes and audio
+            for _, ps, _ in pipeline(text, voice=voice, speed=speed):
+                ref_s = pack[len(ps)-1]
+                
                 try:
-                    # Convert to high-quality WAV
+                    # Use appropriate model (GPU or CPU)
+                    if use_gpu and self.cuda_available:
+                        audio = self.models[True](ps, ref_s, speed)
+                    else:
+                        audio = self.models[False](ps, ref_s, speed)
+                except Exception as e:
+                    if use_gpu and self.cuda_available:
+                        print(f"GPU inference failed: {e}, falling back to CPU")
+                        audio = self.models[False](ps, ref_s, speed)
+                    else:
+                        raise e
+                # Convert to WAV format
+                try:
                     wav_buffer = io.BytesIO()
-                    sf.write(wav_buffer, 24000, format='WAV')
+                    sf.write(wav_buffer, audio.numpy(), 24000, format='WAV')
                     wav_buffer.seek(0)
                     audio_bytes = wav_buffer.getvalue()
                     wav_buffer.close()
@@ -238,13 +278,7 @@ class TTSEngine:
                         
                 except Exception as audio_error:
                     print(f"Audio processing failed: {audio_error}")
-                    # Fallback to original audio
-                    wav_buffer = io.BytesIO()
-                    sf.write(wav_buffer, audio, 24000, format='WAV')
-                    wav_buffer.seek(0)
-                    audio_bytes = wav_buffer.getvalue()
-                    wav_buffer.close()
-                    return audio_bytes
+                    raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(audio_error)}")
             
         except Exception as e:
             import traceback
@@ -268,7 +302,9 @@ class Language(str, Enum):
 async def voice_generate(
     amount: float = Form(..., description="Amount with up to 2 decimal places"),
     currency: Currency = Form(..., description="Currency: USD or KHR"),
-    language: Language = Form(..., description="Language: EN or CH")
+    language: Language = Form(..., description="Language: EN or CH"),
+    speed: float = Form(1.0, description="Speech speed (0.5-2.0, default 1.0)"),
+    use_gpu: bool = Form(None, description="Force GPU/CPU usage (default: auto)")
 ):
     """
     Generate voice audio for received amount
@@ -277,6 +313,8 @@ async def voice_generate(
     - amount: Float with max 2 decimal places (e.g., 100.00, 2882283.50)
     - currency: "USD" or "KHR"
     - language: "EN" or "CH"
+    - speed: Speech speed (0.5-2.0, default 1.0)
+    - use_gpu: Force GPU/CPU usage (default: auto-detect)
     
     Returns streaming WAV audio response
     """
@@ -295,9 +333,13 @@ async def voice_generate(
     if amount < 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
     
+    # Validate speed parameter
+    if speed < 0.5 or speed > 2.0:
+        raise HTTPException(status_code=400, detail="Speed must be between 0.5 and 2.0")
+    
     # Generate speech
     start_time = time.time()
-    audio_bytes = tts_engine.generate_speech(amount, currency, language)
+    audio_bytes = tts_engine.generate_speech(amount, currency, language, speed, use_gpu)
     generation_time = time.time() - start_time
     
     print(f"Audio generated in {generation_time:.2f}s, size: {len(audio_bytes)} bytes")
