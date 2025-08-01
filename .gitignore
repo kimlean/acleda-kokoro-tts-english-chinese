@@ -1,0 +1,114 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+tts/
+venv/
+ENV/
+env/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Audio test files
+*test_samples/
+api_test_samples/
+best_voice_samples/
+*.wav
+*.mp3
+*.flac
+
+# Temporary files
+*.tmp
+*.temp
+test_*.py
+test_*.wav
+test_*.mp3
+test_local_only.*
+test_chinese_pipeline.*
+test_chinese.*
+
+# Model cache and downloads
+.cache/
+cache/
+models/
+checkpoints/
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+desktop.ini
+
+# GPU/CUDA
+.nv/
+
+# Hugging Face cache
+.huggingface/
+transformers_cache/
+
+# FastAPI
+.pytest_cache/
+
+# Local configuration
+config.local.json
+settings.local.json
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+*.pyc
+
+# Documentation builds
+docs/_build/
+site/
+
+/kokoro_model

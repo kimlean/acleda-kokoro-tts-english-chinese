@@ -1,0 +1,40 @@
+# Core audio processing
+soundfile>=0.12.1
+numpy>=1.24.0
+
+# FastAPI and web server
+fastapi>=0.116.0
+uvicorn>=0.35.0
+python-multipart>=0.0.20
+
+# Hugging Face and model dependencies
+huggingface_hub>=0.24.0
+transformers>=4.44.0
+tokenizers>=0.19.0
+
+# PyTorch with CUDA 11.8 support
+--index-url https://download.pytorch.org/whl/cu118
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Kokoro TTS
+kokoro-tts>=0.1.0
+
+# Text processing and number conversion
+num2words>=0.5.14
+jieba>=0.42.1
+cn2an>=0.5.23
+pypinyin>=0.55.0
+ordered_set>=4.1.0
+
+# Audio processing (optional, for future MP3 support)
+pydub>=0.25.1
+
+# Spacy for English NLP
+spacy>=3.8.0
+
+# HTTP requests for testing
+requests>=2.32.0
+
+# Progress bars and utilities
+tqdm>=4.66.0

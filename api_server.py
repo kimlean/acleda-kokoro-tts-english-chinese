@@ -1,0 +1,331 @@
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware import Middleware
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+import soundfile as sf
+import numpy as np
+from pathlib import Path
+import os
+import warnings
+import torch
+import io
+import tempfile
+import time
+from num2words import num2words
+from kokoro import KPipeline
+from pydub import AudioSegment
+from enum import Enum
+
+# Suppress warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.rnn")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.utils.weight_norm")
+
+app = FastAPI(title="Kokoro TTS API", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+model_dir = Path("./kokoro_model")
+
+class TTSEngine:
+    def __init__(self):
+        self.pipelines = {}
+        self.device = None
+        self.setup_model()
+    
+    def setup_model(self):
+        """Initialize the TTS model and check GPU availability"""
+        # Check GPU availability
+        if torch.cuda.is_available():
+            self.device = 'cuda'
+            print(f"GPU Available: {torch.cuda.get_device_name(0)}")
+        else:
+            self.device = 'cpu'
+            print("Using CPU for inference")
+        
+        # Check local model exists
+        model_path = model_dir / "kokoro-v1_0.pth"
+        voices_path = model_dir / "voices"
+        
+        if not model_path.exists():
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        
+        if not voices_path.exists():
+            raise FileNotFoundError(f"Voices directory not found: {voices_path}")
+        
+        # Set environment variables for local cache usage (don't set offline mode)
+        os.environ['HF_HOME'] = str(model_dir)
+        os.environ['TRANSFORMERS_CACHE'] = str(model_dir)
+        os.environ['HF_HUB_CACHE'] = str(model_dir)
+        os.environ['HUGGINGFACE_HUB_CACHE'] = str(model_dir)
+        os.environ['KOKORO_MODEL_PATH'] = str(model_path)
+        os.environ['KOKORO_VOICES_PATH'] = str(voices_path)
+        
+        # Disable telemetry but allow downloads if needed
+        os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+        
+        print(f"Model initialized on {self.device}")
+    
+    def get_pipeline(self, lang_code):
+        """Get or create pipeline for specific language"""
+        if lang_code not in self.pipelines:
+            # Initialize pipeline exactly like working voice_generator.py
+            model_path = model_dir / "kokoro-v1_0.pth"
+            self.pipelines[lang_code] = KPipeline(
+                lang_code=lang_code,
+                model=str(model_path),
+                device=self.device
+            )
+        return self.pipelines[lang_code]
+    
+    def amount_to_words_english(self, amount):
+        """Convert amount to English words for USD"""
+        dollars = int(amount)
+        cents = round((amount - dollars) * 100)
+        
+        if dollars == 0:
+            dollar_text = ""
+        elif dollars == 1:
+            dollar_text = "one dollar"
+        else:
+            dollar_text = f"{num2words(dollars)} dollars"
+        
+        if cents == 0:
+            cent_text = ""
+        elif cents == 1:
+            cent_text = "one cent"
+        else:
+            cent_text = f"{num2words(cents)} cents"
+        
+        if dollar_text and cent_text:
+            return f"{dollar_text} and {cent_text}"
+        elif dollar_text:
+            return dollar_text
+        else:
+            return cent_text if cent_text else "zero dollars"
+    
+    def amount_to_words_khmer(self, amount):
+        """Convert amount to words for KHR (convert to integer riels)"""
+        riels = int(amount)  # Convert to integer, no decimals for KHR
+        
+        if riels == 0:
+            return "zero riels"
+        elif riels == 1:
+            return "one riel"
+        else:
+            return f"{num2words(riels)} riels"
+    
+    def number_to_chinese(self, num):
+        """Simple Chinese number conversion"""
+        if num == 0:
+            return "零"
+        
+        digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+        units = ["", "十", "百", "千", "万"]
+        
+        if num < 10:
+            return digits[num]
+        elif num < 100:
+            tens = num // 10
+            ones = num % 10
+            if tens == 1:
+                return "十" + (digits[ones] if ones > 0 else "")
+            else:
+                return digits[tens] + "十" + (digits[ones] if ones > 0 else "")
+        elif num < 1000:
+            hundreds = num // 100
+            remainder = num % 100
+            result = digits[hundreds] + "百"
+            if remainder > 0:
+                if remainder < 10:
+                    result += "零" + digits[remainder]
+                else:
+                    result += self.number_to_chinese(remainder)
+            return result
+        else:
+            # For larger numbers, use simplified approach
+            return str(num)  # Fallback to digits
+    
+    def amount_to_words_chinese(self, amount, currency):
+        """Convert amount to Chinese words"""
+        try:
+            if currency == "USD":
+                dollars = int(amount)
+                cents = round((amount - dollars) * 100)
+                
+                if dollars == 0:
+                    dollar_text = ""
+                else:
+                    dollar_text = f"{self.number_to_chinese(dollars)}美元"
+                
+                if cents == 0:
+                    cent_text = ""
+                else:
+                    cent_text = f"{self.number_to_chinese(cents)}美分"
+                
+                if dollar_text and cent_text:
+                    return f"{dollar_text}{cent_text}"
+                elif dollar_text:
+                    return dollar_text
+                else:
+                    return cent_text if cent_text else "零美元"
+            
+            else:  # KHR
+                riels = int(amount)
+                if riels == 0:
+                    return "零瑞尔"
+                else:
+                    return f"{self.number_to_chinese(riels)}瑞尔"
+        except Exception as e:
+            print(f"Error in Chinese conversion: {e}")
+            # Fallback to simple format
+            if currency == "USD":
+                return f"{amount}美元"
+            else:
+                return f"{int(amount)}瑞尔"
+    
+    def generate_speech(self, amount: float, currency: str, language: str):
+        """Generate speech audio for the given parameters"""
+        try:
+            # Convert amount to words based on language and currency
+            if language == "EN":
+                if currency == "USD":
+                    amount_words = self.amount_to_words_english(amount)
+                else:  # KHR
+                    amount_words = self.amount_to_words_khmer(amount)
+                
+                text = f"Have received {amount_words}"
+                lang_code = 'b'  # English
+                voice = 'af_heart'  # Female English voice
+            
+            else:  # Chinese
+                amount_words = self.amount_to_words_chinese(amount, currency)
+                text = f"已收到{amount_words}"  # "Have received" in Chinese
+                lang_code = 'z'  # Chinese
+                voice = 'zf_xiaoxiao'  # Female Chinese voice
+            
+            print(f"Generating text using voice '{voice}' in language '{language}'")
+            
+            # Create pipeline fresh each time like working voice_generator.py
+            model_path = model_dir / "kokoro-v1_0.pth"
+            pipeline = KPipeline(
+                lang_code=lang_code,
+                model=str(model_path),
+                device=self.device
+            )
+            
+            # Generate audio
+            generator = pipeline(text, voice=voice, split_pattern=r'\n+')
+            
+            # Extract audio data
+            for i, (gs, ps, audio) in enumerate(generator):
+                # Apply slower speech and return as WAV
+                try:
+                    # Convert to high-quality WAV
+                    wav_buffer = io.BytesIO()
+                    sf.write(wav_buffer, 24000, format='WAV')
+                    wav_buffer.seek(0)
+                    audio_bytes = wav_buffer.getvalue()
+                    wav_buffer.close()
+                    return audio_bytes
+                        
+                except Exception as audio_error:
+                    print(f"Audio processing failed: {audio_error}")
+                    # Fallback to original audio
+                    wav_buffer = io.BytesIO()
+                    sf.write(wav_buffer, audio, 24000, format='WAV')
+                    wav_buffer.seek(0)
+                    audio_bytes = wav_buffer.getvalue()
+                    wav_buffer.close()
+                    return audio_bytes
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Error generating speech: {e}")
+            print(f"Full traceback: {error_details}")
+            raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
+
+# Initialize TTS engine
+tts_engine = TTSEngine()
+
+class Currency(str, Enum):
+    USD = "USD"
+    KHR = "KHR"
+
+class Language(str, Enum):
+    EN = "EN"
+    CH = "CH"
+
+@app.post("/voicegenerate")
+async def voice_generate(
+    amount: float = Form(..., description="Amount with up to 2 decimal places"),
+    currency: Currency = Form(..., description="Currency: USD or KHR"),
+    language: Language = Form(..., description="Language: EN or CH")
+):
+    """
+    Generate voice audio for received amount
+    
+    Parameters:
+    - amount: Float with max 2 decimal places (e.g., 100.00, 2882283.50)
+    - currency: "USD" or "KHR"
+    - language: "EN" or "CH"
+    
+    Returns streaming WAV audio response
+    """
+    
+    # Validate inputs
+    if currency not in ["USD", "KHR"]:
+        raise HTTPException(status_code=400, detail="Currency must be 'USD' or 'KHR'")
+    
+    if language not in ["EN", "CH"]:
+        raise HTTPException(status_code=400, detail="Language must be 'EN' or 'CH'")
+    
+    # Validate amount format (max 2 decimal places)
+    if round(amount, 2) != amount:
+        raise HTTPException(status_code=400, detail="Amount must have maximum 2 decimal places")
+    
+    if amount < 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    
+    # Generate speech
+    start_time = time.time()
+    audio_bytes = tts_engine.generate_speech(amount, currency, language)
+    generation_time = time.time() - start_time
+    
+    print(f"Audio generated in {generation_time:.2f}s, size: {len(audio_bytes)} bytes")
+    
+    # Return streaming WAV response
+    return StreamingResponse(
+        io.BytesIO(audio_bytes),
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": "attachment; filename=voice.wav",
+            "Content-Length": str(len(audio_bytes))
+        }
+    )
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "device": tts_engine.device,
+        "model_loaded": len(tts_engine.pipelines) > 0
+    }
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "api_server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        workers=1  # Single worker to avoid GPU memory issues
+    )
