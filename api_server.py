@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -14,7 +14,6 @@ import tempfile
 import time
 from num2words import num2words
 from kokoro import KModel, KPipeline
-from pydub import AudioSegment
 from enum import Enum
 
 # Suppress warnings
@@ -37,6 +36,7 @@ model_dir = Path("./kokoro_model")
 class TTSEngine:
     def __init__(self):
         self.pipelines = {}
+        self.voice_models = {}  # Cache for voice-specific models
         self.models = {}
         self.device = None
         self.cuda_available = False
@@ -85,12 +85,13 @@ class TTSEngine:
         try:
             # Always create CPU model from local file
             print(f"Loading CPU model from: {model_path}")
-            self.models[False] = KModel(str(model_path)).to('cpu').eval()
+            config_path = model_dir / "config.json"
+            self.models[False] = KModel(config=str(config_path), model=str(model_path)).to('cpu').eval()
             
             # Create GPU model if available
             if self.cuda_available:
                 print(f"Loading GPU model from: {model_path}")
-                self.models[True] = KModel(str(model_path)).to('cuda').eval()
+                self.models[True] = KModel(config=str(config_path), model=str(model_path)).to('cuda').eval()
                 
         except Exception as e:
             print(f"Error loading model: {e}")
@@ -99,20 +100,49 @@ class TTSEngine:
         
         print(f"Models initialized - CPU: True, GPU: {self.cuda_available}")
     
-    def get_pipeline(self, lang_code):
-        """Get or create pipeline for specific language"""
-        if lang_code not in self.pipelines:
+    def get_pipeline(self, lang_code, voice):
+        """Get or create pipeline for specific language and voice"""
+        pipeline_key = f"{lang_code}_{voice}"
+        
+        if pipeline_key not in self.pipelines:
             # Initialize pipeline without model (offline mode)
             try:
-                self.pipelines[lang_code] = KPipeline(
+                pipeline = KPipeline(
                     lang_code=lang_code,
                     model=False  # Don't load model in pipeline - use cached models
                 )
-                print(f"Pipeline for '{lang_code}' initialized successfully (offline)")
+                self.pipelines[pipeline_key] = pipeline
+                print(f"Pipeline for '{lang_code}' with voice '{voice}' initialized successfully (offline)")
             except Exception as e:
-                print(f"Error initializing pipeline for '{lang_code}': {e}")
+                print(f"Error initializing pipeline for '{lang_code}' with voice '{voice}': {e}")
                 raise
-        return self.pipelines[lang_code]
+        return self.pipelines[pipeline_key]
+    
+    def get_voice_model(self, voice, use_gpu=False):
+        """Get or create cached voice model"""
+        model_key = f"{voice}_{use_gpu}"
+        
+        if model_key not in self.voice_models:
+            try:
+                # Load voice-specific model
+                voices_path = model_dir / "voices" / f"{voice}.pt"
+                if not voices_path.exists():
+                    raise FileNotFoundError(f"Voice file not found: {voices_path}")
+                
+                # Use the appropriate base model (GPU or CPU)
+                base_model = self.models[use_gpu and self.cuda_available]
+                
+                # Cache the voice model
+                self.voice_models[model_key] = {
+                    'model': base_model,
+                    'voice_path': str(voices_path)
+                }
+                print(f"Voice model '{voice}' cached successfully (GPU: {use_gpu and self.cuda_available})")
+            except Exception as e:
+                print(f"Error caching voice model '{voice}': {e}")
+                raise
+        
+        return self.voice_models[model_key]
     
     def amount_to_words_english(self, amount):
         """Convert amount to English words for USD"""
@@ -220,7 +250,7 @@ class TTSEngine:
             else:
                 return f"{int(amount)}瑞尔"
     
-    def generate_speech(self, amount: float, currency: str, language: str, speed: float = 1.0, use_gpu: bool = None):
+    def generate_speech(self, amount: float, currency: str, language: str, speed: float = 0.8, use_gpu: bool = None):
         """Generate speech audio for the given parameters"""
         # Default to GPU if available, otherwise CPU
         if use_gpu is None:
@@ -245,8 +275,11 @@ class TTSEngine:
             
             print(f"Generating text using voice '{voice}' in language '{language}', speed: {speed}, GPU: {use_gpu}")
             
-            # Get cached pipeline
-            pipeline = self.get_pipeline(lang_code)
+            # Get cached pipeline for this language and voice
+            pipeline = self.get_pipeline(lang_code, voice)
+            
+            # Get cached voice model
+            voice_model_info = self.get_voice_model(voice, use_gpu)
             
             # Load voice pack
             pack = pipeline.load_voice(voice)
@@ -256,21 +289,20 @@ class TTSEngine:
                 ref_s = pack[len(ps)-1]
                 
                 try:
-                    # Use appropriate model (GPU or CPU)
-                    if use_gpu and self.cuda_available:
-                        audio = self.models[True](ps, ref_s, speed)
-                    else:
-                        audio = self.models[False](ps, ref_s, speed)
+                    # Use the cached voice model
+                    audio = voice_model_info['model'](ps, ref_s, speed)
                 except Exception as e:
                     if use_gpu and self.cuda_available:
                         print(f"GPU inference failed: {e}, falling back to CPU")
-                        audio = self.models[False](ps, ref_s, speed)
+                        # Fallback to CPU model
+                        cpu_voice_model = self.get_voice_model(voice, False)
+                        audio = cpu_voice_model['model'](ps, ref_s, speed)
                     else:
                         raise e
-                # Convert to WAV format
+                # Convert to mp3 format
                 try:
                     wav_buffer = io.BytesIO()
-                    sf.write(wav_buffer, audio.numpy(), 24000, format='WAV')
+                    sf.write(wav_buffer, audio.numpy(), 24000, format='mp3')
                     wav_buffer.seek(0)
                     audio_bytes = wav_buffer.getvalue()
                     wav_buffer.close()
@@ -303,7 +335,7 @@ async def voice_generate(
     amount: float = Form(..., description="Amount with up to 2 decimal places"),
     currency: Currency = Form(..., description="Currency: USD or KHR"),
     language: Language = Form(..., description="Language: EN or CH"),
-    speed: float = Form(1.0, description="Speech speed (0.5-2.0, default 1.0)"),
+    speed: float = Form(0.8, description="Speech speed (0.5-2.0, default 1.0)"),
     use_gpu: bool = Form(None, description="Force GPU/CPU usage (default: auto)")
 ):
     """
@@ -316,7 +348,7 @@ async def voice_generate(
     - speed: Speech speed (0.5-2.0, default 1.0)
     - use_gpu: Force GPU/CPU usage (default: auto-detect)
     
-    Returns streaming WAV audio response
+    Returns streaming mp3 audio response
     """
     
     # Validate inputs
@@ -344,12 +376,11 @@ async def voice_generate(
     
     print(f"Audio generated in {generation_time:.2f}s, size: {len(audio_bytes)} bytes")
     
-    # Return streaming WAV response
-    return StreamingResponse(
-        io.BytesIO(audio_bytes),
-        media_type="audio/wav",
+    # Return streaming mp3 response
+    return Response(
+        content=audio_bytes,
+        media_type="audio/mp3",
         headers={
-            "Content-Disposition": "attachment; filename=voice.wav",
             "Content-Length": str(len(audio_bytes))
         }
     )
