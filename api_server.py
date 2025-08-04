@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -401,11 +401,11 @@ class Language(str, Enum):
 
 @app.post("/voicegenerate")
 async def voice_generate(
-    amount: float = Form(..., description="Amount with up to 2 decimal places"),
-    currency: Currency = Form(..., description="Currency: USD or KHR"),
-    language: Language = Form(..., description="Language: EN or CH"),
-    speed: float = Form(0.8, description="Speech speed (0.5-2.0, default 1.0)"),
-    thx_mode: bool = Form(False, description="Use (default: False)"),
+    amount: float,
+    currency: Currency,
+    language: Language,
+    speed: float = 0.8,
+    thx_mode: bool = False,
 ):
     """
     Generate voice audio for received amount
