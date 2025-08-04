@@ -32,7 +32,7 @@ class APIService:
         }
         
         try:
-            response = self.session.post(url, json=payload, timeout=30)
+            response = self.session.post(url, params=payload, timeout=30)
             response.raise_for_status()
             return response.content
         except requests.exceptions.RequestException as e:
