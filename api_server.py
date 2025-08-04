@@ -14,6 +14,8 @@ import tempfile
 import time
 import hashlib
 import pickle
+import requests
+import urllib.request
 from num2words import num2words
 from kokoro import KModel, KPipeline
 from enum import Enum
@@ -63,10 +65,12 @@ class TTSEngine:
         voices_path = model_dir / "voices"
         
         if not model_path.exists():
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            print(f"Model file not found at {model_path}. Downloading...")
+            self.download_model_files()
         
         if not voices_path.exists():
-            raise FileNotFoundError(f"Voices directory not found: {voices_path}")
+            print(f"Voices directory not found at {voices_path}. Downloading...")
+            self.download_voice_files()
         
         # Set environment variables for complete offline operation
         os.environ['HF_HOME'] = str(model_dir)
@@ -105,6 +109,59 @@ class TTSEngine:
         print(f"Models initialized - CPU: True, GPU: {self.cuda_available}")
         self.load_cache()
         self.warm_models()
+    
+    def download_model_files(self):
+        """Download model files from Hugging Face"""
+        base_url = "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main"
+        model_dir.mkdir(exist_ok=True)
+        
+        # Download main model file
+        model_url = f"{base_url}/kokoro-v1_0.pth"
+        model_path = model_dir / "kokoro-v1_0.pth"
+        
+        print(f"Downloading model from {model_url}...")
+        try:
+            urllib.request.urlretrieve(model_url, model_path)
+            print(f"Model downloaded successfully to {model_path}")
+        except Exception as e:
+            print(f"Failed to download model: {e}")
+            raise
+        
+        # Download config file
+        config_url = f"{base_url}/config.json"
+        config_path = model_dir / "config.json"
+        
+        print(f"Downloading config from {config_url}...")
+        try:
+            urllib.request.urlretrieve(config_url, config_path)
+            print(f"Config downloaded successfully to {config_path}")
+        except Exception as e:
+            print(f"Failed to download config: {e}")
+            raise
+    
+    def download_voice_files(self):
+        """Download voice files from Hugging Face"""
+        base_url = "https://huggingface.co/hexgrad/Kokoro-82M/resolve/main/voices"
+        voices_dir = model_dir / "voices"
+        voices_dir.mkdir(exist_ok=True)
+        
+        # List of voice files to download
+        voice_files = [
+            "af_heart.pt",  # English female voice
+            "zf_xiaoxiao.pt"  # Chinese female voice
+        ]
+        
+        for voice_file in voice_files:
+            voice_url = f"{base_url}/{voice_file}"
+            voice_path = voices_dir / voice_file
+            
+            print(f"Downloading voice {voice_file} from {voice_url}...")
+            try:
+                urllib.request.urlretrieve(voice_url, voice_path)
+                print(f"Voice {voice_file} downloaded successfully to {voice_path}")
+            except Exception as e:
+                print(f"Failed to download voice {voice_file}: {e}")
+                raise
     
     def get_pipeline(self, lang_code, voice):
         """Get or create pipeline for specific language and voice"""
