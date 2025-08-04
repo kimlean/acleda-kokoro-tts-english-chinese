@@ -6,17 +6,67 @@ This script generates audio for all combinations of amount, currency, language, 
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from api_server import TTSEngine
+import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+from queue import Queue
+
+class APIService:
+    """REST API client for TTS service"""
+    
+    def __init__(self, base_url="http://localhost:8001"):
+        self.base_url = base_url
+        self.session = requests.Session()
+    
+    def generate_speech(self, amount, currency, language, speed=0.8, thx_mode=False):
+        """Generate speech via REST API"""
+        url = f"{self.base_url}/voicegenerate"
+        
+        payload = {
+            "amount": amount,
+            "currency": currency,
+            "language": language,
+            "speed": speed,
+            "thx_mode": thx_mode
+        }
+        
+        try:
+            response = self.session.post(url, json=payload, timeout=30)
+            response.raise_for_status()
+            return response.content
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"API request failed: {e}")
+
+def generate_single_audio(api_service, amount, currency, language, thx_mode):
+    """Generate a single audio file"""
+    try:
+        audio_bytes = api_service.generate_speech(amount, currency, language, 0.8, thx_mode=thx_mode)
+        return {
+            'success': True,
+            'amount': amount,
+            'currency': currency,
+            'language': language,
+            'thx_mode': thx_mode,
+            'size': len(audio_bytes),
+            'audio_bytes': audio_bytes
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'amount': amount,
+            'currency': currency,
+            'language': language,
+            'thx_mode': thx_mode,
+            'error': str(e)
+        }
 
 def pre_generate_cache():
-    """Pre-generate audio cache for all parameter combinations"""
-    print("Starting audio cache pre-generation...")
+    """Pre-generate audio cache for all parameter combinations using threading"""
+    print("Starting audio cache pre-generation with threading...")
     
-    # Initialize TTS engine
-    tts_engine = TTSEngine()
+    # Initialize API service
+    api_service = APIService()
     
     # Parameters
     languages = ["EN", "CH"]  # English and Chinese
@@ -41,63 +91,52 @@ def pre_generate_cache():
     print(f"USD amounts: {len(usd_amounts)} values")
     print(f"KHR amounts: {len(khr_amounts)} values")
     
-    total_combinations = 0
-    generated_count = 0
-    failed_count = 0
-    
-    # Calculate total combinations
+    # Create task list for all combinations
+    tasks = []
     for language in languages:
         for thx_mode in thx_modes:
-            total_combinations += len(usd_amounts) + len(khr_amounts)
+            # Add USD tasks
+            for amount in usd_amounts:
+                tasks.append((amount, "USD", language, thx_mode))
+            # Add KHR tasks
+            for amount in khr_amounts:
+                tasks.append((amount, "KHR", language, thx_mode))
     
+    total_combinations = len(tasks)
     print(f"Total combinations to generate: {total_combinations}")
     
+    generated_count = 0
+    failed_count = 0
     start_time = time.time()
     
-    # Generate for all combinations
-    for language in languages:
-        print(f"\nGenerating for language: {language}")
+    # Use ThreadPoolExecutor for concurrent processing
+    max_workers = 5  # Adjust based on your system capacity
+    print(f"Using {max_workers} worker threads")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_task = {
+            executor.submit(generate_single_audio, api_service, amount, currency, language, thx_mode): 
+            (amount, currency, language, thx_mode)
+            for amount, currency, language, thx_mode in tasks
+        }
         
-        for thx_mode in thx_modes:
-            thx_status = "with thanks" if thx_mode else "without thanks"
-            print(f"  Mode: {thx_status}")
+        # Process completed tasks
+        for future in as_completed(future_to_task):
+            result = future.result()
             
-            # Generate USD amounts
-            print(f"    Generating USD amounts...")
-            for i, amount in enumerate(usd_amounts):
-                try:
-                    audio_bytes = tts_engine.generate_speech(amount, "USD", language, 0.8, True, thx_mode=thx_mode)
-                    generation_time = time.time() - start_time
-                    print(f"Audio generated in {generation_time:.2f}s, size: {len(audio_bytes)} bytes")
-                    
-                    generated_count += 1
-                    
-                    if (i + 1) % 1000 == 0:
-                        elapsed = time.time() - start_time
-                        progress = (generated_count / total_combinations) * 100
-                        print(f"      Progress: {generated_count}/{total_combinations} ({progress:.1f}%) - {elapsed:.1f}s elapsed")
-                        
-                except Exception as e:
-                    print(f"      Failed to generate USD {amount} for {language} (thx:{thx_mode}): {e}")
-                    failed_count += 1
-            
-            # Generate KHR amounts
-            print(f"    Generating KHR amounts...")
-            for i, amount in enumerate(khr_amounts):
-                try:
-                    audio_bytes = tts_engine.generate_speech(amount, "KHR", language, 0.8, True, thx_mode=thx_mode)
-                    generation_time = time.time() - start_time
-                    print(f"Audio generated in {generation_time:.2f}s, size: {len(audio_bytes)} bytes")
-                    generated_count += 1
-                    
-                    if (i + 1) % 100 == 0:
-                        elapsed = time.time() - start_time
-                        progress = (generated_count / total_combinations) * 100
-                        print(f"      Progress: {generated_count}/{total_combinations} ({progress:.1f}%) - {elapsed:.1f}s elapsed")
-                        
-                except Exception as e:
-                    print(f"      Failed to generate KHR {amount} for {language} (thx:{thx_mode}): {e}")
-                    failed_count += 1
+            if result['success']:
+                generated_count += 1
+                elapsed = time.time() - start_time
+                print(f"✓ {result['currency']} {result['amount']} ({result['language']}, thx:{result['thx_mode']}) - Size: {result['size']} bytes")
+                
+                # Progress update every 100 successful generations
+                if generated_count % 100 == 0:
+                    progress = (generated_count + failed_count) / total_combinations * 100
+                    print(f"  Progress: {generated_count + failed_count}/{total_combinations} ({progress:.1f}%) - {elapsed:.1f}s elapsed")
+            else:
+                failed_count += 1
+                print(f"✗ Failed {result['currency']} {result['amount']} ({result['language']}, thx:{result['thx_mode']}): {result['error']}")
     
     # Final statistics
     end_time = time.time()
@@ -108,7 +147,9 @@ def pre_generate_cache():
     print(f"Successfully generated: {generated_count}")
     print(f"Failed: {failed_count}")
     print(f"Total time: {total_time:.2f} seconds")
-    print(f"Average time per generation: {total_time/generated_count:.3f} seconds")
+    if generated_count > 0:
+        print(f"Average time per generation: {total_time/generated_count:.3f} seconds")
+    print(f"Threads used: {max_workers}")
 
 if __name__ == "__main__":
     pre_generate_cache()
