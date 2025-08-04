@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -37,6 +38,13 @@ app.add_middleware(
 
 model_dir = Path("./kokoro_model")
 
+# Create audio cache directory before mounting static files
+audio_cache_dir = Path("./audio_cache")
+audio_cache_dir.mkdir(exist_ok=True)
+
+# Mount static files for serving cached audio
+app.mount("/audio", StaticFiles(directory="audio_cache"), name="audio")
+
 class TTSEngine:
     def __init__(self):
         self.pipelines = {}
@@ -44,21 +52,22 @@ class TTSEngine:
         self.models = {}
         self.device = None
         self.cuda_available = False
-        self.audio_cache = {}  # In-memory audio cache
+        # File-based cache directory for MP3 files
         self.cache_dir = Path("./audio_cache")
         self.cache_dir.mkdir(exist_ok=True)
+        print(f"Audio cache directory: {self.cache_dir.absolute()}")
         self.setup_model()
     
     def setup_model(self):
-        """Initialize the TTS model and check GPU availability"""
-        # Check GPU availability
+        """Initialize the TTS model with GPU only"""
+        # Check GPU availability - required for this configuration
         self.cuda_available = torch.cuda.is_available()
-        if self.cuda_available:
-            self.device = 'cuda'
-            print(f"GPU Available: {torch.cuda.get_device_name(0)}")
-        else:
-            self.device = 'cpu'
-            print("Using CPU for inference")
+        if not self.cuda_available:
+            raise RuntimeError("GPU is required but not available. Please ensure CUDA is properly installed.")
+        
+        self.device = 'cuda'
+        print(f"GPU Available: {torch.cuda.get_device_name(0)}")
+        print("GPU-only mode enabled")
         
         # Check local model exists
         model_path = model_dir / "kokoro-v1_0.pth"
@@ -91,22 +100,17 @@ class TTSEngine:
         model_path = model_dir / "kokoro-v1_0.pth"
         
         try:
-            # Always create CPU model from local file
-            print(f"Loading CPU model from: {model_path}")
             config_path = model_dir / "config.json"
-            self.models[False] = KModel(config=str(config_path), model=str(model_path)).to('cpu').eval()
+            # Load GPU model only
+            print(f"Loading GPU model from: {model_path}")
+            self.models[True] = KModel(config=str(config_path), model=str(model_path)).to('cuda').eval()
             
-            # Create GPU model if available
-            if self.cuda_available:
-                print(f"Loading GPU model from: {model_path}")
-                self.models[True] = KModel(config=str(config_path), model=str(model_path)).to('cuda').eval()
-                
         except Exception as e:
             print(f"Error loading model: {e}")
             print(f"Make sure {model_path} exists and is accessible")
             raise
         
-        print(f"Models initialized - CPU: True, GPU: {self.cuda_available}")
+        print(f"GPU model initialized successfully")
         self.load_cache()
         self.warm_models()
     
@@ -192,15 +196,15 @@ class TTSEngine:
                 if not voices_path.exists():
                     raise FileNotFoundError(f"Voice file not found: {voices_path}")
                 
-                # Use the appropriate base model (GPU or CPU)
-                base_model = self.models[use_gpu and self.cuda_available]
+                # Use GPU model only
+                base_model = self.models[True]
                 
                 # Cache the voice model
                 self.voice_models[model_key] = {
                     'model': base_model,
                     'voice_path': str(voices_path)
                 }
-                print(f"Voice model '{voice}' cached successfully (GPU: {use_gpu and self.cuda_available})")
+                print(f"Voice model '{voice}' cached successfully (GPU: True)")
             except Exception as e:
                 print(f"Error caching voice model '{voice}': {e}")
                 raise
@@ -213,31 +217,26 @@ class TTSEngine:
         return hashlib.md5(key_string.encode()).hexdigest()
     
     def load_cache(self):
-        """Load cached audio files into memory"""
-        cache_files = list(self.cache_dir.glob("*.cache"))
-        print(f"Loading {len(cache_files)} cached audio files...")
-        for cache_file in cache_files:
-            try:
-                with open(cache_file, 'rb') as f:
-                    cache_data = pickle.load(f)
-                    self.audio_cache[cache_file.stem] = cache_data['audio_bytes']
-            except Exception as e:
-                print(f"Error loading cache file {cache_file}: {e}")
-        print(f"Loaded {len(self.audio_cache)} audio files into memory cache")
+        """Initialize file-based cache directory"""
+        mp3_files = list(self.cache_dir.glob("*.mp3"))
+        print(f"Found {len(mp3_files)} cached MP3 files in {self.cache_dir}")
     
     def save_to_cache(self, cache_key: str, audio_bytes: bytes):
-        """Save audio to both memory and disk cache"""
-        self.audio_cache[cache_key] = audio_bytes
-        cache_file = self.cache_dir / f"{cache_key}.cache"
+        """Save audio as MP3 file to disk cache"""
+        cache_file = self.cache_dir / f"{cache_key}.mp3"
         try:
             with open(cache_file, 'wb') as f:
-                pickle.dump({'audio_bytes': audio_bytes}, f)
+                f.write(audio_bytes)
+            print(f"Audio saved to: {cache_file}")
         except Exception as e:
-            print(f"Error saving to cache: {e}")
+            print(f"Error saving audio to cache: {e}")
     
     def get_from_cache(self, cache_key: str):
-        """Get audio from memory cache"""
-        return self.audio_cache.get(cache_key)
+        """Check if cached MP3 file exists and return file path"""
+        cache_file = self.cache_dir / f"{cache_key}.mp3"
+        if cache_file.exists():
+            return cache_file
+        return None
     
     def warm_models(self):
         """Pre-warm models and pipelines to reduce first-request latency"""
@@ -246,7 +245,7 @@ class TTSEngine:
             # Warm up both language pipelines
             for lang_code, voice in [('b', 'af_heart'), ('z', 'zf_xiaoxiao')]:
                 pipeline = self.get_pipeline(lang_code, voice)
-                voice_model = self.get_voice_model(voice, self.cuda_available)
+                voice_model = self.get_voice_model(voice, True)
                 print(f"Warmed up {lang_code} pipeline with voice {voice}")
             print("Model warming completed")
         except Exception as e:
@@ -362,16 +361,15 @@ class TTSEngine:
         """Generate speech audio for the given parameters"""
         # Check cache first
         cache_key = self.get_cache_key(amount, currency, language, speed, thx_mode)
-        cached_audio = self.get_from_cache(cache_key)
-        if cached_audio:
-            print(f"Cache hit! Returning cached audio for {cache_key}")
-            return cached_audio
+        cached_file = self.get_from_cache(cache_key)
+        if cached_file:
+            print(f"Cache hit! Returning cached file: {cached_file}")
+            return cached_file
         
         print(f"Cache miss. Generating new audio for {cache_key}")
         
-        # Default to GPU if available, otherwise CPU
-        if use_gpu is None:
-            use_gpu = self.cuda_available
+        # GPU only mode
+        use_gpu = True
         try:
             # Convert amount to words based on language and currency
             if language == "EN":
@@ -395,7 +393,7 @@ class TTSEngine:
                 lang_code = 'z'  # Chinese
                 voice = 'zf_xiaoxiao'  # Female Chinese voice
             
-            print(f"Generating text using voice '{voice}' in language '{language}', speed: {speed}, GPU: {use_gpu}")
+            print(f"Generating text using voice '{voice}' in language '{language}', speed: {speed}, GPU: {use_gpu}, words: {amount_words}")
             
             # Get cached pipeline for this language and voice
             pipeline = self.get_pipeline(lang_code, voice)
@@ -410,17 +408,8 @@ class TTSEngine:
             for _, ps, _ in pipeline(text, voice=voice, speed=speed):
                 ref_s = pack[len(ps)-1]
                 
-                try:
-                    # Use the cached voice model
-                    audio = voice_model_info['model'](ps, ref_s, speed)
-                except Exception as e:
-                    if use_gpu and self.cuda_available:
-                        print(f"GPU inference failed: {e}, falling back to CPU")
-                        # Fallback to CPU model
-                        cpu_voice_model = self.get_voice_model(voice, False)
-                        audio = cpu_voice_model['model'](ps, ref_s, speed)
-                    else:
-                        raise e
+                # Use GPU model for inference
+                audio = voice_model_info['model'](ps, ref_s, speed)
                 # Convert to mp3 format (optimized)
                 try:
                     audio_np = audio.cpu().numpy() if hasattr(audio, 'cpu') else audio.numpy()
@@ -432,7 +421,8 @@ class TTSEngine:
                     self.save_to_cache(cache_key, audio_bytes)
                     print(f"Audio cached with key: {cache_key}")
                     
-                    return audio_bytes
+                    # Return the cached file path
+                    return self.cache_dir / f"{cache_key}.mp3"
                         
                 except Exception as audio_error:
                     print(f"Audio processing failed: {audio_error}")
@@ -498,22 +488,30 @@ async def voice_generate(
     # PRINT REQUEST RECIVED
     print(f"Received request: amount={amount}, currency={currency}, language={language}, speed={speed}, use_gpu={True}") 
     
-    # Generate speech
+    # Generate speech (returns file path for cached, bytes for new)
     start_time = time.time()
-    audio_bytes = tts_engine.generate_speech(amount, currency, language, speed, True, thx_mode)
+    result = tts_engine.generate_speech(amount, currency, language, speed, True, thx_mode)
     generation_time = time.time() - start_time
     
-    print(f"Audio generated in {generation_time:.2f}s, size: {len(audio_bytes)} bytes")
-    
-    # Return streaming mp3 response
-    return Response(
-        content=audio_bytes,
-        media_type="audio/mp3",
-        headers={
-            "Content-Length": str(len(audio_bytes)),
-            "Content-Disposition": "attachment; filename=voice.mp3"
-        }
-    )
+    # Check if result is a file path (cached) or bytes (newly generated)
+    if isinstance(result, Path):
+        print(f"Serving cached file in {generation_time:.2f}s: {result}")
+        return FileResponse(
+            path=str(result),
+            media_type="audio/mp3",
+            filename="voice.mp3"
+        )
+    else:
+        # This shouldn't happen with the new implementation, but keeping as fallback
+        print(f"Audio generated in {generation_time:.2f}s, size: {len(result)} bytes")
+        return Response(
+            content=result,
+            media_type="audio/mp3",
+            headers={
+                "Content-Length": str(len(result)),
+                "Content-Disposition": "attachment; filename=voice.mp3"
+            }
+        )
 
 @app.get("/health")
 async def health_check():
