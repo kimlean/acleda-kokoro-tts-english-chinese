@@ -12,6 +12,8 @@ import torch
 import io
 import tempfile
 import time
+import hashlib
+import pickle
 from num2words import num2words
 from kokoro import KModel, KPipeline
 from enum import Enum
@@ -40,6 +42,9 @@ class TTSEngine:
         self.models = {}
         self.device = None
         self.cuda_available = False
+        self.audio_cache = {}  # In-memory audio cache
+        self.cache_dir = Path("./audio_cache")
+        self.cache_dir.mkdir(exist_ok=True)
         self.setup_model()
     
     def setup_model(self):
@@ -98,6 +103,8 @@ class TTSEngine:
             raise
         
         print(f"Models initialized - CPU: True, GPU: {self.cuda_available}")
+        self.load_cache()
+        self.warm_models()
     
     def get_pipeline(self, lang_code, voice):
         """Get or create pipeline for specific language and voice"""
@@ -142,6 +149,51 @@ class TTSEngine:
                 raise
         
         return self.voice_models[model_key]
+    
+    def get_cache_key(self, amount: float, currency: str, language: str, speed: float, thx_mode: bool):
+        """Generate cache key for audio"""
+        key_string = f"{amount}_{currency}_{language}_{speed}_{thx_mode}"
+        return hashlib.md5(key_string.encode()).hexdigest()
+    
+    def load_cache(self):
+        """Load cached audio files into memory"""
+        cache_files = list(self.cache_dir.glob("*.cache"))
+        print(f"Loading {len(cache_files)} cached audio files...")
+        for cache_file in cache_files:
+            try:
+                with open(cache_file, 'rb') as f:
+                    cache_data = pickle.load(f)
+                    self.audio_cache[cache_file.stem] = cache_data['audio_bytes']
+            except Exception as e:
+                print(f"Error loading cache file {cache_file}: {e}")
+        print(f"Loaded {len(self.audio_cache)} audio files into memory cache")
+    
+    def save_to_cache(self, cache_key: str, audio_bytes: bytes):
+        """Save audio to both memory and disk cache"""
+        self.audio_cache[cache_key] = audio_bytes
+        cache_file = self.cache_dir / f"{cache_key}.cache"
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump({'audio_bytes': audio_bytes}, f)
+        except Exception as e:
+            print(f"Error saving to cache: {e}")
+    
+    def get_from_cache(self, cache_key: str):
+        """Get audio from memory cache"""
+        return self.audio_cache.get(cache_key)
+    
+    def warm_models(self):
+        """Pre-warm models and pipelines to reduce first-request latency"""
+        print("Warming up models...")
+        try:
+            # Warm up both language pipelines
+            for lang_code, voice in [('b', 'af_heart'), ('z', 'zf_xiaoxiao')]:
+                pipeline = self.get_pipeline(lang_code, voice)
+                voice_model = self.get_voice_model(voice, self.cuda_available)
+                print(f"Warmed up {lang_code} pipeline with voice {voice}")
+            print("Model warming completed")
+        except Exception as e:
+            print(f"Model warming failed: {e}")
     
     def amount_to_words_english(self, amount):
         """Convert amount to English words for USD"""
@@ -251,6 +303,15 @@ class TTSEngine:
     
     def generate_speech(self, amount: float, currency: str, language: str, speed: float = 0.8, use_gpu: bool = None, thx_mode: bool = False):
         """Generate speech audio for the given parameters"""
+        # Check cache first
+        cache_key = self.get_cache_key(amount, currency, language, speed, thx_mode)
+        cached_audio = self.get_from_cache(cache_key)
+        if cached_audio:
+            print(f"Cache hit! Returning cached audio for {cache_key}")
+            return cached_audio
+        
+        print(f"Cache miss. Generating new audio for {cache_key}")
+        
         # Default to GPU if available, otherwise CPU
         if use_gpu is None:
             use_gpu = self.cuda_available
@@ -303,13 +364,17 @@ class TTSEngine:
                         audio = cpu_voice_model['model'](ps, ref_s, speed)
                     else:
                         raise e
-                # Convert to mp3 format
+                # Convert to mp3 format (optimized)
                 try:
+                    audio_np = audio.cpu().numpy() if hasattr(audio, 'cpu') else audio.numpy()
                     wav_buffer = io.BytesIO()
-                    sf.write(wav_buffer, audio.numpy(), 24000, format='mp3')
-                    wav_buffer.seek(0)
+                    sf.write(wav_buffer, audio_np, 24000, format='mp3')
                     audio_bytes = wav_buffer.getvalue()
-                    wav_buffer.close()
+                    
+                    # Save to cache
+                    self.save_to_cache(cache_key, audio_bytes)
+                    print(f"Audio cached with key: {cache_key}")
+                    
                     return audio_bytes
                         
                 except Exception as audio_error:

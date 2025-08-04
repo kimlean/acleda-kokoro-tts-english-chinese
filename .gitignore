@@ -112,3 +112,4 @@ docs/_build/
 site/
 
 /kokoro_model
+/audio_cache
