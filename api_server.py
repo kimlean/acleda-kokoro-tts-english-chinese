@@ -166,27 +166,30 @@ class TTSEngine:
             except Exception as e:
                 print(f"Failed to download voice {voice_file}: {e}")
                 raise
-    
+            
     def get_pipeline(self, lang_code, voice):
         """Get or create pipeline for specific language and voice"""
         pipeline_key = f"{lang_code}_{voice}"
         
         if pipeline_key not in self.pipelines:
-            # Initialize pipeline without model (offline mode)
             try:
+                # Initialize pipeline with local model path
+                config_path = model_dir / "config.json"
+                model_path = model_dir / "kokoro-v1_0.pth"
+                
                 pipeline = KPipeline(
                     lang_code=lang_code,
-                    model=False  # Don't load model in pipeline - use cached models
+                    model=str(model_path)  # Use local model path instead of False
                 )
                 self.pipelines[pipeline_key] = pipeline
-                print(f"Pipeline for '{lang_code}' with voice '{voice}' initialized successfully (offline)")
+                print(f"Pipeline for '{lang_code}' initialized with local model")
             except Exception as e:
-                print(f"Error initializing pipeline for '{lang_code}' with voice '{voice}': {e}")
+                print(f"Error initializing pipeline for '{lang_code}': {e}")
                 raise
         return self.pipelines[pipeline_key]
     
     def get_voice_model(self, voice, use_gpu=False):
-        """Get or create cached voice model"""
+        """Get or create cached voice model with local voice loading"""
         model_key = f"{voice}_{use_gpu}"
         
         if model_key not in self.voice_models:
@@ -196,17 +199,21 @@ class TTSEngine:
                 if not voices_path.exists():
                     raise FileNotFoundError(f"Voice file not found: {voices_path}")
                 
+                # Load the voice pack directly from local file
+                voice_pack = torch.load(voices_path, map_location='cuda' if use_gpu else 'cpu')
+                
                 # Use GPU model only
                 base_model = self.models[True]
                 
-                # Cache the voice model
+                # Cache the voice model with the loaded pack
                 self.voice_models[model_key] = {
                     'model': base_model,
+                    'voice_pack': voice_pack,
                     'voice_path': str(voices_path)
                 }
-                print(f"Voice model '{voice}' cached successfully (GPU: True)")
+                print(f"Voice model '{voice}' loaded from local file and cached successfully (GPU: True)")
             except Exception as e:
-                print(f"Error caching voice model '{voice}': {e}")
+                print(f"Error loading local voice model '{voice}': {e}")
                 raise
         
         return self.voice_models[model_key]
@@ -398,18 +405,20 @@ class TTSEngine:
             # Get cached pipeline for this language and voice
             pipeline = self.get_pipeline(lang_code, voice)
             
-            # Get cached voice model
+            # Get cached voice model with local voice pack
             voice_model_info = self.get_voice_model(voice, use_gpu)
             
-            # Load voice pack
-            pack = pipeline.load_voice(voice)
+            # Use the locally loaded voice pack instead of pipeline.load_voice()
+            voice_pack = voice_model_info['voice_pack']
             
-            # Generate phonemes and audio
+            # Generate phonemes using pipeline
             for _, ps, _ in pipeline(text, voice=voice, speed=speed):
-                ref_s = pack[len(ps)-1]
+                # Use the voice pack length for reference
+                ref_s = voice_pack[len(ps)-1] if len(ps)-1 < len(voice_pack) else voice_pack[-1]
                 
                 # Use GPU model for inference
                 audio = voice_model_info['model'](ps, ref_s, speed)
+                
                 # Convert to mp3 format (optimized)
                 try:
                     audio_np = audio.cpu().numpy() if hasattr(audio, 'cpu') else audio.numpy()
