@@ -65,7 +65,6 @@ class TTSEngine:
         
         # Set environment variables for complete offline operation
         os.environ['HF_HOME'] = str(model_dir)
-        os.environ['TRANSFORMERS_CACHE'] = str(model_dir)
         os.environ['HF_HUB_CACHE'] = str(model_dir)
         os.environ['HUGGINGFACE_HUB_CACHE'] = str(model_dir)
         os.environ['KOKORO_MODEL_PATH'] = str(model_path)
@@ -250,7 +249,7 @@ class TTSEngine:
             else:
                 return f"{int(amount)}瑞尔"
     
-    def generate_speech(self, amount: float, currency: str, language: str, speed: float = 0.8, use_gpu: bool = None):
+    def generate_speech(self, amount: float, currency: str, language: str, speed: float = 0.8, use_gpu: bool = None, thx_mode: bool = False):
         """Generate speech audio for the given parameters"""
         # Default to GPU if available, otherwise CPU
         if use_gpu is None:
@@ -262,14 +261,19 @@ class TTSEngine:
                     amount_words = self.amount_to_words_english(amount)
                 else:  # KHR
                     amount_words = self.amount_to_words_khmer(amount)
-                
-                text = f"Have received {amount_words}"
+                if thx_mode == True:
+                    text = f"Have received {amount_words} thanks you"
+                else:
+                    text = f"Have received {amount_words}"
                 lang_code = 'b'  # English
                 voice = 'af_heart'  # Female English voice
             
-            else:  # Chinese
+            elif language == "CH":  # Chinese
                 amount_words = self.amount_to_words_chinese(amount, currency)
-                text = f"已收到{amount_words}"  # "Have received" in Chinese
+                if thx_mode == True:
+                    text = f"已收到{amount_words} 谢谢您"
+                else:
+                    text = f"已收到{amount_words}"  # "Have received" in Chinese
                 lang_code = 'z'  # Chinese
                 voice = 'zf_xiaoxiao'  # Female Chinese voice
             
@@ -336,7 +340,7 @@ async def voice_generate(
     currency: Currency = Form(..., description="Currency: USD or KHR"),
     language: Language = Form(..., description="Language: EN or CH"),
     speed: float = Form(0.8, description="Speech speed (0.5-2.0, default 1.0)"),
-    use_gpu: bool = Form(None, description="Force GPU/CPU usage (default: auto)")
+    thx_mode: bool = Form(False, description="Use (default: False)"),
 ):
     """
     Generate voice audio for received amount
@@ -369,9 +373,12 @@ async def voice_generate(
     if speed < 0.5 or speed > 2.0:
         raise HTTPException(status_code=400, detail="Speed must be between 0.5 and 2.0")
     
+    # PRINT REQUEST RECIVED
+    print(f"Received request: amount={amount}, currency={currency}, language={language}, speed={speed}, use_gpu={True}") 
+    
     # Generate speech
     start_time = time.time()
-    audio_bytes = tts_engine.generate_speech(amount, currency, language, speed, use_gpu)
+    audio_bytes = tts_engine.generate_speech(amount, currency, language, speed, True, thx_mode)
     generation_time = time.time() - start_time
     
     print(f"Audio generated in {generation_time:.2f}s, size: {len(audio_bytes)} bytes")
@@ -381,7 +388,8 @@ async def voice_generate(
         content=audio_bytes,
         media_type="audio/mp3",
         headers={
-            "Content-Length": str(len(audio_bytes))
+            "Content-Length": str(len(audio_bytes)),
+            "Content-Disposition": "attachment; filename=voice.mp3"
         }
     )
 
@@ -398,7 +406,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "api_server:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=True,
         workers=1  # Single worker to avoid GPU memory issues
     )
