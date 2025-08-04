@@ -81,24 +81,16 @@ class TTSEngine:
             print(f"Voices directory not found at {voices_path}. Downloading...")
             self.download_voice_files()
         
-        # Set environment variables for complete offline operation
-        os.environ['HF_HOME'] = str(model_dir)
-        os.environ['HF_HUB_CACHE'] = str(model_dir)
-        os.environ['HUGGINGFACE_HUB_CACHE'] = str(model_dir)
-        os.environ['KOKORO_MODEL_PATH'] = str(model_path)
-        os.environ['KOKORO_VOICES_PATH'] = str(voices_path)
+        # TEMPORARILY DISABLE OFFLINE MODE to allow initial setup
+        # Comment out these offline mode settings for now
+        # os.environ['HF_HUB_OFFLINE'] = '1'
+        # os.environ['TRANSFORMERS_OFFLINE'] = '1'
+        # os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+        # os.environ['HF_DATASETS_OFFLINE'] = '1'
         
-        # Force complete offline mode - no internet access
-        os.environ['HF_HUB_OFFLINE'] = '1'
-        os.environ['TRANSFORMERS_OFFLINE'] = '1'
-        os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
-        os.environ['HF_DATASETS_OFFLINE'] = '1'
-        
-        print("Forced offline mode - no internet access allowed")
+        print("Offline mode temporarily disabled for model loading")
         
         # Initialize KModel instances using local files only
-        model_path = model_dir / "kokoro-v1_0.pth"
-        
         try:
             config_path = model_dir / "config.json"
             # Load GPU model only
@@ -152,7 +144,7 @@ class TTSEngine:
         # List of voice files to download
         voice_files = [
             "af_heart.pt",  # English female voice
-            "zf_xiaoxiao.pt"  # Chinese female voice
+            "zf_xiaoni.pt"  # Chinese female voice
         ]
         
         for voice_file in voice_files:
@@ -173,16 +165,13 @@ class TTSEngine:
         
         if pipeline_key not in self.pipelines:
             try:
-                # Initialize pipeline with local model path
-                config_path = model_dir / "config.json"
-                model_path = model_dir / "kokoro-v1_0.pth"
-                
+                # Pass the already loaded model instance instead of creating new one
                 pipeline = KPipeline(
                     lang_code=lang_code,
-                    model=str(model_path)  # Use local model path instead of False
+                    model=self.models[True]  # Use already loaded model instance
                 )
                 self.pipelines[pipeline_key] = pipeline
-                print(f"Pipeline for '{lang_code}' initialized with local model")
+                print(f"Pipeline for '{lang_code}' initialized with pre-loaded model")
             except Exception as e:
                 print(f"Error initializing pipeline for '{lang_code}': {e}")
                 raise
@@ -249,8 +238,8 @@ class TTSEngine:
         """Pre-warm models and pipelines to reduce first-request latency"""
         print("Warming up models...")
         try:
-            # Warm up both language pipelines
-            for lang_code, voice in [('b', 'af_heart'), ('z', 'zf_xiaoxiao')]:
+            # Warm up both language pipelines - use 'a' for English, 'z' for Chinese
+            for lang_code, voice in [('a', 'af_heart'), ('z', 'zf_xiaoni')]:
                 pipeline = self.get_pipeline(lang_code, voice)
                 voice_model = self.get_voice_model(voice, True)
                 print(f"Warmed up {lang_code} pipeline with voice {voice}")
@@ -296,35 +285,113 @@ class TTSEngine:
             return f"{num2words(riels)} riels"
     
     def number_to_chinese(self, num):
-        """Simple Chinese number conversion"""
+        """Comprehensive Chinese number conversion for numbers up to billions"""
         if num == 0:
             return "零"
         
         digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
-        units = ["", "十", "百", "千", "万"]
         
-        if num < 10:
-            return digits[num]
-        elif num < 100:
-            tens = num // 10
-            ones = num % 10
-            if tens == 1:
-                return "十" + (digits[ones] if ones > 0 else "")
-            else:
-                return digits[tens] + "十" + (digits[ones] if ones > 0 else "")
-        elif num < 1000:
-            hundreds = num // 100
-            remainder = num % 100
-            result = digits[hundreds] + "百"
-            if remainder > 0:
-                if remainder < 10:
-                    result += "零" + digits[remainder]
+        def convert_section(n, is_beginning=True):
+            """Convert a section (0-9999) to Chinese
+            is_beginning: True if this is the first/leading section of the number
+            """
+            if n == 0:
+                return ""
+            elif n < 10:
+                return digits[n]
+            elif n < 100:
+                tens = n // 10
+                ones = n % 10
+                if tens == 1:
+                    # Special case: if this is not the beginning section, use "一十"
+                    if is_beginning:
+                        return "十" + (digits[ones] if ones > 0 else "")
+                    else:
+                        return "一十" + (digits[ones] if ones > 0 else "")
                 else:
-                    result += self.number_to_chinese(remainder)
-            return result
-        else:
-            # For larger numbers, use simplified approach
-            return str(num)  # Fallback to digits
+                    return digits[tens] + "十" + (digits[ones] if ones > 0 else "")
+            elif n < 1000:
+                hundreds = n // 100
+                remainder = n % 100
+                result = digits[hundreds] + "百"
+                if remainder == 0:
+                    return result
+                elif remainder < 10:
+                    return result + "零" + digits[remainder]
+                else:
+                    # When we have remainder in tens, it's not the beginning anymore
+                    return result + convert_section(remainder, False)
+            else:  # n < 10000
+                thousands = n // 1000
+                remainder = n % 1000
+                result = digits[thousands] + "千"
+                if remainder == 0:
+                    return result
+                elif remainder < 100:
+                    if remainder < 10:
+                        return result + "零" + convert_section(remainder, False)
+                    else:
+                        # Special handling for 10-99 after thousands
+                        return result + "零" + convert_section(remainder, False)
+                else:
+                    return result + convert_section(remainder, False)
+        
+        # Handle different ranges
+        if num < 10000:
+            return convert_section(num, True)
+        elif num < 100000000:  # Less than 1 yi (100 million)
+            wan = num // 10000
+            remainder = num % 10000
+            result = convert_section(wan, True) + "万"
+            if remainder == 0:
+                return result
+            elif remainder < 1000:
+                if remainder < 100:
+                    if remainder < 10:
+                        return result + "零" + convert_section(remainder, False)
+                    else:
+                        # Special case: numbers like 50010, 30010 - need "零一十"
+                        return result + "零" + convert_section(remainder, False)
+                else:
+                    return result + "零" + convert_section(remainder, False)
+            else:
+                return result + convert_section(remainder, False)
+        else:  # 1 yi or more
+            yi = num // 100000000
+            remainder = num % 100000000
+            result = convert_section(yi, True) + "亿"
+            if remainder == 0:
+                return result
+            elif remainder < 10000000:  # Less than 1000 wan
+                if remainder < 10000:
+                    if remainder < 1000:
+                        if remainder < 100:
+                            if remainder < 10:
+                                return result + "零" + convert_section(remainder, False)
+                            else:
+                                return result + "零" + convert_section(remainder, False)
+                        else:
+                            return result + "零" + convert_section(remainder, False)
+                    else:
+                        return result + "零" + convert_section(remainder, False)
+                else:
+                    wan_part = remainder // 10000
+                    final_remainder = remainder % 10000
+                    wan_result = convert_section(wan_part, False) + "万"
+                    if final_remainder == 0:
+                        return result + wan_result
+                    elif final_remainder < 1000:
+                        if final_remainder < 100:
+                            if final_remainder < 10:
+                                return result + wan_result + "零" + convert_section(final_remainder, False)
+                            else:
+                                return result + wan_result + "零" + convert_section(final_remainder, False)
+                        else:
+                            return result + wan_result + "零" + convert_section(final_remainder, False)
+                    else:
+                        return result + wan_result + convert_section(final_remainder, False)
+            else:
+                return result + self.number_to_chinese(remainder)
     
     def amount_to_words_chinese(self, amount, currency):
         """Convert amount to Chinese words"""
@@ -365,7 +432,7 @@ class TTSEngine:
                 return f"{int(amount)}瑞尔"
     
     def generate_speech(self, amount: float, currency: str, language: str, speed: float = 0.8, use_gpu: bool = None, thx_mode: bool = False):
-        """Generate speech audio for the given parameters"""
+        """Generate speech audio for the given parameters - using completely local approach"""
         # Check cache first
         cache_key = self.get_cache_key(amount, currency, language, speed, thx_mode)
         cached_file = self.get_from_cache(cache_key)
@@ -385,41 +452,46 @@ class TTSEngine:
                 else:  # KHR
                     amount_words = self.amount_to_words_khmer(amount)
                 if thx_mode == True:
-                    text = f"Have received {amount_words} thanks you"
+                    text = f"{amount_words} received. Thanks you"
                 else:
-                    text = f"Have received {amount_words}"
-                lang_code = 'b'  # English
+                    text = f"{amount_words} received"
+                lang_code = 'a'  # English
                 voice = 'af_heart'  # Female English voice
             
             elif language == "CH":  # Chinese
                 amount_words = self.amount_to_words_chinese(amount, currency)
                 if thx_mode == True:
-                    text = f"已收到{amount_words} 谢谢您"
+                    text = f"已收到{amount_words}. 谢谢"
                 else:
                     text = f"已收到{amount_words}"  # "Have received" in Chinese
                 lang_code = 'z'  # Chinese
-                voice = 'zf_xiaoxiao'  # Female Chinese voice
+                voice = 'zf_xiaoni'  # Female Chinese voice
             
             print(f"Generating text using voice '{voice}' in language '{language}', speed: {speed}, GPU: {use_gpu}, words: {amount_words}")
             
-            # Get cached pipeline for this language and voice
+            # Load voice pack directly from local file - bypassing pipeline voice loading
+            voice_path = model_dir / "voices" / f"{voice}.pt"
+            if not voice_path.exists():
+                raise FileNotFoundError(f"Voice file not found: {voice_path}")
+            
+            voice_pack = torch.load(voice_path, map_location='cuda')
+            print(f"Loaded voice pack from: {voice_path}")
+            
+            # Get pipeline for phoneme generation only
             pipeline = self.get_pipeline(lang_code, voice)
             
-            # Get cached voice model with local voice pack
-            voice_model_info = self.get_voice_model(voice, use_gpu)
+            # Generate phonemes WITH voice parameter (but we'll use our local voice pack)
+            phoneme_results = list(pipeline(text, voice=voice, speed=speed))
             
-            # Use the locally loaded voice pack instead of pipeline.load_voice()
-            voice_pack = voice_model_info['voice_pack']
-            
-            # Generate phonemes using pipeline
-            for _, ps, _ in pipeline(text, voice=voice, speed=speed):
-                # Use the voice pack length for reference
+            for _, ps, _ in phoneme_results:
+                # Use voice pack directly
                 ref_s = voice_pack[len(ps)-1] if len(ps)-1 < len(voice_pack) else voice_pack[-1]
                 
                 # Use GPU model for inference
-                audio = voice_model_info['model'](ps, ref_s, speed)
+                base_model = self.models[True]
+                audio = base_model(ps, ref_s, speed)
                 
-                # Convert to mp3 format (optimized)
+                # Convert to mp3 format
                 try:
                     audio_np = audio.cpu().numpy() if hasattr(audio, 'cpu') else audio.numpy()
                     wav_buffer = io.BytesIO()
@@ -443,7 +515,7 @@ class TTSEngine:
             print(f"Error generating speech: {e}")
             print(f"Full traceback: {error_details}")
             raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
-
+        
 # Initialize TTS engine
 tts_engine = TTSEngine()
 
