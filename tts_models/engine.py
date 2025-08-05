@@ -1,45 +1,21 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response, FileResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware import Middleware
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 import soundfile as sf
 import numpy as np
 from pathlib import Path
 import warnings
 import torch
 import io
-import time
 import hashlib
 import urllib.request
-from num2words import num2words
 from kokoro import KModel, KPipeline
-from enum import Enum
+from fastapi import HTTPException
+
+from utils.text_conversion import TextConverter
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.rnn")
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch.nn.utils.weight_norm")
 
-app = FastAPI(title="Kokoro TTS API", version="1.0.0")
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 model_dir = Path("./kokoro_model")
-
-# Create audio cache directory before mounting static files
-audio_cache_dir = Path("./audio_cache")
-audio_cache_dir.mkdir(exist_ok=True)
-
-# Mount static files for serving cached audio
-app.mount("/audio", StaticFiles(directory="audio_cache"), name="audio")
 
 class TTSEngine:
     def __init__(self):
@@ -52,6 +28,7 @@ class TTSEngine:
         self.cache_dir = Path("./audio_cache")
         self.cache_dir.mkdir(exist_ok=True)
         print(f"Audio cache directory: {self.cache_dir.absolute()}")
+        self.text_converter = TextConverter()
         self.setup_model()
     
     def setup_model(self):
@@ -243,190 +220,6 @@ class TTSEngine:
         except Exception as e:
             print(f"Model warming failed: {e}")
     
-    def amount_to_words_english(self, amount):
-        """Convert amount to English words for USD"""
-        dollars = int(amount)
-        cents = round((amount - dollars) * 100)
-        
-        if dollars == 0:
-            dollar_text = ""
-        elif dollars == 1:
-            dollar_text = "one dollar"
-        else:
-            dollar_text = f"{num2words(dollars)} dollars"
-        
-        if cents == 0:
-            cent_text = ""
-        elif cents == 1:
-            cent_text = "one cent"
-        else:
-            cent_text = f"{num2words(cents)} cents"
-        
-        if dollar_text and cent_text:
-            return f"{dollar_text} and {cent_text}"
-        elif dollar_text:
-            return dollar_text
-        else:
-            return cent_text if cent_text else "zero dollars"
-    
-    def amount_to_words_khmer(self, amount):
-        """Convert amount to words for KHR (convert to integer riels)"""
-        riels = int(amount)  # Convert to integer, no decimals for KHR
-        
-        if riels == 0:
-            return "zero riels"
-        elif riels == 1:
-            return "one riel"
-        else:
-            return f"{num2words(riels)} riels"
-    
-    def number_to_chinese(self, num):
-        """Comprehensive Chinese number conversion for numbers up to billions"""
-        if num == 0:
-            return "零"
-        
-        digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
-        
-        def convert_section(n, is_beginning=True):
-            """Convert a section (0-9999) to Chinese
-            is_beginning: True if this is the first/leading section of the number
-            """
-            if n == 0:
-                return ""
-            elif n < 10:
-                return digits[n]
-            elif n < 100:
-                tens = n // 10
-                ones = n % 10
-                if tens == 1:
-                    # Special case: if this is not the beginning section, use "一十"
-                    if is_beginning:
-                        return "十" + (digits[ones] if ones > 0 else "")
-                    else:
-                        return "一十" + (digits[ones] if ones > 0 else "")
-                else:
-                    return digits[tens] + "十" + (digits[ones] if ones > 0 else "")
-            elif n < 1000:
-                hundreds = n // 100
-                remainder = n % 100
-                result = digits[hundreds] + "百"
-                if remainder == 0:
-                    return result
-                elif remainder < 10:
-                    return result + "零" + digits[remainder]
-                else:
-                    # When we have remainder in tens, it's not the beginning anymore
-                    return result + convert_section(remainder, False)
-            else:  # n < 10000
-                thousands = n // 1000
-                remainder = n % 1000
-                result = digits[thousands] + "千"
-                if remainder == 0:
-                    return result
-                elif remainder < 100:
-                    if remainder < 10:
-                        return result + "零" + convert_section(remainder, False)
-                    else:
-                        # Special handling for 10-99 after thousands
-                        return result + "零" + convert_section(remainder, False)
-                else:
-                    return result + convert_section(remainder, False)
-        
-        # Handle different ranges
-        if num < 10000:
-            return convert_section(num, True)
-        elif num < 100000000:  # Less than 1 yi (100 million)
-            wan = num // 10000
-            remainder = num % 10000
-            result = convert_section(wan, True) + "万"
-            if remainder == 0:
-                return result
-            elif remainder < 1000:
-                if remainder < 100:
-                    if remainder < 10:
-                        return result + "零" + convert_section(remainder, False)
-                    else:
-                        # Special case: numbers like 50010, 30010 - need "零一十"
-                        return result + "零" + convert_section(remainder, False)
-                else:
-                    return result + "零" + convert_section(remainder, False)
-            else:
-                return result + convert_section(remainder, False)
-        else:  # 1 yi or more
-            yi = num // 100000000
-            remainder = num % 100000000
-            result = convert_section(yi, True) + "亿"
-            if remainder == 0:
-                return result
-            elif remainder < 10000000:  # Less than 1000 wan
-                if remainder < 10000:
-                    if remainder < 1000:
-                        if remainder < 100:
-                            if remainder < 10:
-                                return result + "零" + convert_section(remainder, False)
-                            else:
-                                return result + "零" + convert_section(remainder, False)
-                        else:
-                            return result + "零" + convert_section(remainder, False)
-                    else:
-                        return result + "零" + convert_section(remainder, False)
-                else:
-                    wan_part = remainder // 10000
-                    final_remainder = remainder % 10000
-                    wan_result = convert_section(wan_part, False) + "万"
-                    if final_remainder == 0:
-                        return result + wan_result
-                    elif final_remainder < 1000:
-                        if final_remainder < 100:
-                            if final_remainder < 10:
-                                return result + wan_result + "零" + convert_section(final_remainder, False)
-                            else:
-                                return result + wan_result + "零" + convert_section(final_remainder, False)
-                        else:
-                            return result + wan_result + "零" + convert_section(final_remainder, False)
-                    else:
-                        return result + wan_result + convert_section(final_remainder, False)
-            else:
-                return result + self.number_to_chinese(remainder)
-    
-    def amount_to_words_chinese(self, amount, currency):
-        """Convert amount to Chinese words"""
-        try:
-            if currency == "USD":
-                dollars = int(amount)
-                cents = round((amount - dollars) * 100)
-                
-                if dollars == 0:
-                    dollar_text = ""
-                else:
-                    dollar_text = f"{self.number_to_chinese(dollars)}美元"
-                
-                if cents == 0:
-                    cent_text = ""
-                else:
-                    cent_text = f"{self.number_to_chinese(cents)}美分"
-                
-                if dollar_text and cent_text:
-                    return f"{dollar_text}{cent_text}"
-                elif dollar_text:
-                    return dollar_text
-                else:
-                    return cent_text if cent_text else "零美元"
-            
-            else:  # KHR
-                riels = int(amount)
-                if riels == 0:
-                    return "零瑞尔"
-                else:
-                    return f"{self.number_to_chinese(riels)}瑞尔"
-        except Exception as e:
-            print(f"Error in Chinese conversion: {e}")
-            # Fallback to simple format
-            if currency == "USD":
-                return f"{amount}美元"
-            else:
-                return f"{int(amount)}瑞尔"
-    
     def generate_speech(self, amount: float, currency: str, language: str, speed: float = 0.8, use_gpu: bool = None, thx_mode: bool = False):
         """Generate speech audio for the given parameters - using completely local approach"""
         # Check cache first
@@ -444,9 +237,9 @@ class TTSEngine:
             # Convert amount to words based on language and currency
             if language == "EN":
                 if currency == "USD":
-                    amount_words = self.amount_to_words_english(amount)
+                    amount_words = self.text_converter.amount_to_words_english(amount)
                 else:  # KHR
-                    amount_words = self.amount_to_words_khmer(amount)
+                    amount_words = self.text_converter.amount_to_words_khmer(amount)
                 if thx_mode == True:
                     text = f"{amount_words} received. Thanks you"
                 else:
@@ -455,7 +248,7 @@ class TTSEngine:
                 voice = 'af_heart'  # Female English voice
             
             elif language == "CH":  # Chinese
-                amount_words = self.amount_to_words_chinese(amount, currency)
+                amount_words = self.text_converter.amount_to_words_chinese(amount, currency)
                 if thx_mode == True:
                     text = f"已收到{amount_words}. 谢谢"
                 else:
@@ -511,99 +304,3 @@ class TTSEngine:
             print(f"Error generating speech: {e}")
             print(f"Full traceback: {error_details}")
             raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
-        
-# Initialize TTS engine
-tts_engine = TTSEngine()
-
-class Currency(str, Enum):
-    USD = "USD"
-    KHR = "KHR"
-
-class Language(str, Enum):
-    EN = "EN"
-    CH = "CH"
-
-@app.post("/voicegenerate")
-async def voice_generate(
-    amount: float,
-    currency: Currency,
-    language: Language,
-    speed: float = 0.8,
-    thx_mode: bool = False,
-):
-    """
-    Generate voice audio for received amount
-    
-    Parameters:
-    - amount: Float with max 2 decimal places (e.g., 100.00, 2882283.50)
-    - currency: "USD" or "KHR"
-    - language: "EN" or "CH"
-    - speed: Speech speed (0.5-2.0, default 1.0)
-    - use_gpu: Force GPU/CPU usage (default: auto-detect)
-    
-    Returns streaming mp3 audio response
-    """
-    
-    # Validate inputs
-    if currency not in ["USD", "KHR"]:
-        raise HTTPException(status_code=400, detail="Currency must be 'USD' or 'KHR'")
-    
-    if language not in ["EN", "CH"]:
-        raise HTTPException(status_code=400, detail="Language must be 'EN' or 'CH'")
-    
-    # Validate amount format (max 2 decimal places)
-    if round(amount, 2) != amount:
-        raise HTTPException(status_code=400, detail="Amount must have maximum 2 decimal places")
-    
-    if amount < 0:
-        raise HTTPException(status_code=400, detail="Amount must be positive")
-    
-    # Validate speed parameter
-    if speed < 0.5 or speed > 2.0:
-        raise HTTPException(status_code=400, detail="Speed must be between 0.5 and 2.0")
-    
-    # PRINT REQUEST RECIVED
-    print(f"Received request: amount={amount}, currency={currency}, language={language}, speed={speed}, use_gpu={True}") 
-    
-    # Generate speech (returns file path for cached, bytes for new)
-    start_time = time.time()
-    result = tts_engine.generate_speech(amount, currency, language, speed, True, thx_mode)
-    generation_time = time.time() - start_time
-    
-    # Check if result is a file path (cached) or bytes (newly generated)
-    if isinstance(result, Path):
-        print(f"Serving cached file in {generation_time:.2f}s: {result}")
-        return FileResponse(
-            path=str(result),
-            media_type="audio/mp3",
-            filename="voice.mp3"
-        )
-    else:
-        # This shouldn't happen with the new implementation, but keeping as fallback
-        print(f"Audio generated in {generation_time:.2f}s, size: {len(result)} bytes")
-        return Response(
-            content=result,
-            media_type="audio/mp3",
-            headers={
-                "Content-Length": str(len(result)),
-                "Content-Disposition": "attachment; filename=voice.mp3"
-            }
-        )
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "device": tts_engine.device,
-        "model_loaded": len(tts_engine.pipelines) > 0
-    }
-
-if __name__ == "__main__":
-    uvicorn.run(
-        "api_server:app",
-        host="0.0.0.0",
-        port=8001,
-        reload=True,
-        workers=1  # Single worker to avoid GPU memory issues
-    )

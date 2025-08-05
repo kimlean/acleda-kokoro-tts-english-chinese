@@ -71,7 +71,6 @@ test_chinese.*
 # Model cache and downloads
 .cache/
 cache/
-models/
 checkpoints/
 
 # System files
