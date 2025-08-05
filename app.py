@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import uvicorn
 
-from tts.routes import router as tts_router
+from tts_models.routes import router as tts_router
 
 # Create FastAPI app
 app = FastAPI(title="Kokoro TTS API", version="1.0.0")
