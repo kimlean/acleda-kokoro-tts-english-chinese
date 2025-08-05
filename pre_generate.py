@@ -4,13 +4,11 @@ Pre-generate audio cache for all parameter combinations to improve response time
 This script generates audio for all combinations of amount, currency, language, and thx_mode.
 """
 
-import sys
-import os
 import requests
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from queue import Queue
+import gc
 
 class APIService:
     """REST API client for TTS service"""
@@ -34,7 +32,9 @@ class APIService:
         try:
             response = self.session.post(url, params=payload, timeout=30)
             response.raise_for_status()
-            return response.content
+            content = response.content
+            response.close()
+            return content
         except requests.exceptions.RequestException as e:
             raise Exception(f"API request failed: {e}")
 
@@ -42,14 +42,16 @@ def generate_single_audio(api_service, amount, currency, language, thx_mode):
     """Generate a single audio file"""
     try:
         audio_bytes = api_service.generate_speech(amount, currency, language, 0.8, thx_mode=thx_mode)
+        size = len(audio_bytes)
+        del audio_bytes
+        gc.collect()
         return {
             'success': True,
             'amount': amount,
             'currency': currency,
             'language': language,
             'thx_mode': thx_mode,
-            'size': len(audio_bytes),
-            'audio_bytes': audio_bytes
+            'size': size
         }
     except Exception as e:
         return {
@@ -110,7 +112,7 @@ def pre_generate_cache():
     start_time = time.time()
     
     # Use ThreadPoolExecutor for concurrent processing
-    max_workers = 5  # Adjust based on your system capacity
+    max_workers = 10  # Adjust based on your system capacity
     print(f"Using {max_workers} worker threads")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -134,9 +136,12 @@ def pre_generate_cache():
                 if generated_count % 100 == 0:
                     progress = (generated_count + failed_count) / total_combinations * 100
                     print(f"  Progress: {generated_count + failed_count}/{total_combinations} ({progress:.1f}%) - {elapsed:.1f}s elapsed")
+                    gc.collect()
             else:
                 failed_count += 1
                 print(f"✗ Failed {result['currency']} {result['amount']} ({result['language']}, thx:{result['thx_mode']}): {result['error']}")
+            
+            del result
     
     # Final statistics
     end_time = time.time()
