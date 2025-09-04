@@ -159,12 +159,16 @@ class TextConverter:
                     whole_part, decimal_part = amount_str.split('.')
                     whole_num = int(whole_part)
                     
-                    # Convert decimal part digit by digit
+                    # Convert decimal part digit by digit (including leading zeros)
                     digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
                     decimal_digits = []
-                    for digit in decimal_part:
-                        if digit != '0':  # Skip trailing zeros
-                            decimal_digits.append(digits[int(digit)] + ", ")
+                    
+                    # Skip if all decimal digits are zero (like 1000.00)
+                    if decimal_part == "00":
+                        decimal_digits = []
+                    else:
+                        for digit in decimal_part:
+                            decimal_digits.append(digits[int(digit)] + ",")
                     
                     if whole_num == 0 and not decimal_digits:
                         return "零美元"
