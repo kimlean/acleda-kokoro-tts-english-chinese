@@ -153,25 +153,29 @@ class TextConverter:
         """Convert amount to Chinese words"""
         try:
             if currency == "USD":
-                dollars = int(amount)
-                cents = round((amount - dollars) * 100)
-                
-                if dollars == 0:
-                    dollar_text = ""
+                # Handle decimal point format like 10.10 -> 十点一美元
+                amount_str = f"{amount:.2f}"
+                if '.' in amount_str:
+                    whole_part, decimal_part = amount_str.split('.')
+                    whole_num = int(whole_part)
+                    
+                    # Convert decimal part digit by digit
+                    digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+                    decimal_digits = []
+                    for digit in decimal_part:
+                        if digit != '0':  # Skip trailing zeros
+                            decimal_digits.append(digits[int(digit)] + ", ")
+                    
+                    if whole_num == 0 and not decimal_digits:
+                        return "零美元"
+                    elif whole_num == 0:
+                        return f"零点{''.join(decimal_digits)}美元"
+                    elif not decimal_digits:
+                        return f"{self.number_to_chinese(whole_num)}美元"
+                    else:
+                        return f"{self.number_to_chinese(whole_num)}点{''.join(decimal_digits)}美元"
                 else:
-                    dollar_text = f"{self.number_to_chinese(dollars)}美元"
-                
-                if cents == 0:
-                    cent_text = ""
-                else:
-                    cent_text = f"{self.number_to_chinese(cents)}美分"
-                
-                if dollar_text and cent_text:
-                    return f"{dollar_text}{cent_text}"
-                elif dollar_text:
-                    return dollar_text
-                else:
-                    return cent_text if cent_text else "零美元"
+                    return f"{self.number_to_chinese(int(amount))}美元"
             
             else:  # KHR
                 riels = int(amount)

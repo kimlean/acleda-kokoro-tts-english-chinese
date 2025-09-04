@@ -250,11 +250,13 @@ class TTSEngine:
             elif language == "CH":  # Chinese
                 amount_words = self.text_converter.amount_to_words_chinese(amount, currency)
                 if thx_mode == True:
-                    text = f"已收到{amount_words}. 谢谢"
+                    # Old: 谢谢
+                    text = f"[](/ni˨˩˦)[](/ʂoʊ˥ taʊ˥˩){amount_words}。[](/ʂjɛ˥˩ ʂjɛ˥˩)"
                 else:
-                    text = f"已收到{amount_words}"  # "Have received" in Chinese
+                    text = f"[](/ni˨˩˦)[](/ʂoʊ˥ taʊ˥˩){amount_words}"
+                
                 lang_code = 'z'  # Chinese
-                voice = 'zf_xiaoni'  # Female Chinese voice
+                voice = 'zf_xiaobei'  # Female Chinese voice
             
             print(f"Generating text using voice '{voice}' in language '{language}', speed: {speed}, GPU: {use_gpu}, words: {amount_words}")
             
