@@ -184,13 +184,13 @@ class TextConverter:
             else:  # KHR
                 riels = int(amount)
                 if riels == 0:
-                    return "零瑞尔"
+                    return "零[](/ʐweɪ˥˩)(/ɑɚ˨˩˦)"
                 else:
-                    return f"{self.number_to_chinese(riels)}瑞尔"
+                    return f"{self.number_to_chinese(riels)}[](/ʐweɪ˥˩)(/ɑɚ˨˩˦)"
         except Exception as e:
             print(f"Error in Chinese conversion: {e}")
             # Fallback to simple format
             if currency == "USD":
                 return f"{amount}美元"
             else:
-                return f"{int(amount)}瑞尔"
+                return f"{int(amount)}[](/ʐweɪ˥˩)(/ɑɚ˨˩˦)"

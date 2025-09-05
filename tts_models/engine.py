@@ -251,9 +251,9 @@ class TTSEngine:
                 amount_words = self.text_converter.amount_to_words_chinese(amount, currency)
                 if thx_mode == True:
                     # Old: 谢谢
-                    text = f"[](/ni˨˩˦)[](/ʂoʊ˥ taʊ˥˩){amount_words}。[](/ʂjɛ˥˩ ʂjɛ˥˩)"
+                    text = f"[](/ʂoʊ˥ taʊ˥˩){amount_words}。[](/ʂjɛ˥˩ ʂjɛ˥˩)"
                 else:
-                    text = f"[](/ni˨˩˦)[](/ʂoʊ˥ taʊ˥˩){amount_words}"
+                    text = f"[](/ʂoʊ˥ taʊ˥˩){amount_words}"
                 
                 lang_code = 'z'  # Chinese
                 voice = 'zf_xiaobei'  # Female Chinese voice
