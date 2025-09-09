@@ -167,8 +167,13 @@ class TextConverter:
                     if decimal_part == "00":
                         decimal_digits = []
                     else:
-                        for digit in decimal_part:
-                            decimal_digits.append(digits[int(digit)] + ",")
+                        # Remove trailing zeros from decimal part
+                        decimal_part = decimal_part.rstrip('0')
+                        if decimal_part:  # If there are still digits after removing trailing zeros
+                            for digit in decimal_part:
+                                decimal_digits.append(digits[int(digit)] + ",")
+                        else:
+                            decimal_digits = []
                     
                     if whole_num == 0 and not decimal_digits:
                         return "零美元"
