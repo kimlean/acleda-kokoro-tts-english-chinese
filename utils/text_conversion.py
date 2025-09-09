@@ -163,17 +163,24 @@ class TextConverter:
                     digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
                     decimal_digits = []
                     
+                    # New Code for not count 0.10 to 0.1
+                    # if decimal_part == "00":
+                    #     decimal_digits = []
+                    # else:
+                    #     # Remove trailing zeros from decimal part
+                    #     decimal_part = decimal_part.rstrip('0')
+                    #     if decimal_part:  # If there are still digits after removing trailing zeros
+                    #         for digit in decimal_part:
+                    #             decimal_digits.append(digits[int(digit)] + ",")
+                    #     else:
+                    #         decimal_digits = []
+                            
                     # Skip if all decimal digits are zero (like 1000.00)
                     if decimal_part == "00":
                         decimal_digits = []
                     else:
-                        # Remove trailing zeros from decimal part
-                        decimal_part = decimal_part.rstrip('0')
-                        if decimal_part:  # If there are still digits after removing trailing zeros
-                            for digit in decimal_part:
-                                decimal_digits.append(digits[int(digit)] + ",")
-                        else:
-                            decimal_digits = []
+                        for digit in decimal_part:
+                            decimal_digits.append(digits[int(digit)] + ",")
                     
                     if whole_num == 0 and not decimal_digits:
                         return "零美元"
