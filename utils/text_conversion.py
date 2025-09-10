@@ -180,7 +180,7 @@ class TextConverter:
                         decimal_digits = []
                     else:
                         for digit in decimal_part:
-                            decimal_digits.append(digits[int(digit)] + ",")
+                            decimal_digits.append(digits[int(digit)] + ", ")
                     
                     if whole_num == 0 and not decimal_digits:
                         return "零美元"
